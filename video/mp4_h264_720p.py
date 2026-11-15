@@ -263,6 +263,9 @@ def merge_sequential_videos(base_dir):
     for root, dirs, files in os.walk(base_dir):
         folder_name = os.path.basename(root)
         seq_files = []
+        
+        # Use the original regex logic: matches files with optional folder_name prefix
+        # This natively supports "1.mp4", "2-3.mp4", or "folderName_1.mp4"
         pattern = re.compile(rf"^(?:{re.escape(folder_name)}[-_]?)?(\d+)(?:-(\d+))?\.mp4$", re.IGNORECASE)
 
         for f in files:
@@ -277,82 +280,96 @@ def merge_sequential_videos(base_dir):
         if not seq_files:
             continue
 
+        # Sort by start sequence, if same then reverse by end sequence
         seq_files.sort(key=lambda x: (x["start"], -x["end"]))
-        valid_chain, expected_next_start = [], None
+        
+        chains = []
+        current_chain = []
+        expected_next_start = None
 
+        # Support multiple independent merge chains in the same folder to handle gaps
         for curr in seq_files:
             if expected_next_start is None:
-                valid_chain.append(curr)
+                current_chain.append(curr)
                 expected_next_start = curr["end"] + 1
             else:
                 if curr["start"] == expected_next_start:
-                    valid_chain.append(curr)
+                    current_chain.append(curr)
                     expected_next_start = curr["end"] + 1
                 elif curr["start"] < expected_next_start:
+                    # Skip overlaps
                     continue
                 else:
-                    break
+                    # Gap detected, save the current chain if it has at least 2 parts
+                    if len(current_chain) >= 2:
+                        chains.append(current_chain)
+                    current_chain = [curr]
+                    expected_next_start = curr["end"] + 1
+        
+        if len(current_chain) >= 2:
+            chains.append(current_chain)
 
-        if len(valid_chain) < 2:
-            continue
-
-        min_num = valid_chain[0]["start"]
-        max_num = valid_chain[-1]["end"]
-        output = f"{folder_name}_{min_num}-{max_num}.mp4"
-        output_path = Path(root) / output
-
-        if output_path.exists():
-            continue
-
-        # Defensive tmp lock for merging
-        merge_tmp = output_path.with_suffix(".tmp.mp4")
-        try:
-            merge_tmp.touch(exist_ok=False)
-        except FileExistsError:
-            print(f"[!] Skipped merging {output} (tmp exists, another device is processing)")
-            continue
-
-        try:
-            inputs = [x["filename"] for x in valid_chain]
+        for valid_chain in chains:
+            min_num = valid_chain[0]["start"]
+            max_num = valid_chain[-1]["end"]
             
-            # Time gap check: Ensure parts to be merged haven't been deleted by another node
-            missing_inputs = [f for f in inputs if not (Path(root) / f).exists()]
-            if missing_inputs:
-                if merge_tmp.exists():
-                    merge_tmp.unlink()
-                continue
-                
-            print(f"\n[+] Merging {len(inputs)} files into {output} in {root}")
-            ts_files = []
+            # Revert exactly to the original strict file naming logic
+            output = f"{folder_name}_{min_num}-{max_num}.mp4"
+            output_path = Path(root) / output
 
-            for i, video in enumerate(inputs):
-                ts_file = f"temp_{i}.ts"
-                ts_files.append(ts_file)
+            # Skip ONLY this specific chain if output exists, don't break the entire folder
+            if output_path.exists():
+                continue
+
+            # Defensive tmp lock for multi-device concurrency
+            merge_tmp = output_path.with_suffix(".tmp.mp4")
+            try:
+                merge_tmp.touch(exist_ok=False)
+            except FileExistsError:
+                print(f"[!] Skipped merging {output} (tmp exists, another device is processing)")
+                continue
+
+            try:
+                inputs = [x["filename"] for x in valid_chain]
+                
+                # Time gap check: Ensure parts to be merged haven't been deleted by another node
+                missing_inputs = [f for f in inputs if not (Path(root) / f).exists()]
+                if missing_inputs:
+                    if merge_tmp.exists():
+                        merge_tmp.unlink()
+                    continue
+                    
+                print(f"\n[+] Merging {len(inputs)} files into {output} in {root}")
+                ts_files = []
+
+                for i, video in enumerate(inputs):
+                    ts_file = f"temp_{i}.ts"
+                    ts_files.append(ts_file)
+                    subprocess.run(
+                        ["ffmpeg", "-y", "-v", "error", "-i", video, "-c", "copy", "-bsf:v", "h264_mp4toannexb", "-f", "mpegts", ts_file],
+                        cwd=root, check=True
+                    )
+
+                concat_string = "concat:" + "|".join(ts_files)
                 subprocess.run(
-                    ["ffmpeg", "-y", "-v", "error", "-i", video, "-c", "copy", "-bsf:v", "h264_mp4toannexb", "-f", "mpegts", ts_file],
+                    ["ffmpeg", "-y", "-v", "error", "-i", concat_string, "-c", "copy", "-bsf:a", "aac_adtstoasc", "-movflags", "+faststart", str(merge_tmp.name)],
                     cwd=root, check=True
                 )
 
-            concat_string = "concat:" + "|".join(ts_files)
-            subprocess.run(
-                ["ffmpeg", "-y", "-v", "error", "-i", concat_string, "-c", "copy", "-bsf:a", "aac_adtstoasc", "-movflags", "+faststart", str(merge_tmp.name)],
-                cwd=root, check=True
-            )
+                merge_tmp.replace(output_path)
 
-            merge_tmp.replace(output_path)
+                for ts in ts_files:
+                    ts_path = Path(root) / ts
+                    if ts_path.exists():
+                        ts_path.unlink()
 
-            for ts in ts_files:
-                ts_path = Path(root) / ts
-                if ts_path.exists():
-                    ts_path.unlink()
-
-            print(f"[✔] Merged successfully: {output}")
-            merged_count += 1
-            
-        except Exception as e:
-            if merge_tmp.exists():
-                merge_tmp.unlink()
-            print(f"\n[!] Merge Error: {e}")
+                print(f"[✔] Merged successfully: {output}")
+                merged_count += 1
+                
+            except Exception as e:
+                if merge_tmp.exists():
+                    merge_tmp.unlink()
+                print(f"\n[!] Merge Error: {e}")
 
     if merged_count == 0:
         print("[i] No files need merging.")
