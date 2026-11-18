@@ -15,14 +15,14 @@ ExecStart=/usr/bin/podman run \
   --replace \
   --rm \
   --name=emby \
-  -p 8096:8096 \
+  -p 8888:8096 \
   --log-driver=journald \
   --label "io.containers.autoupdate=registry" \
   --label PODMAN_SYSTEMD_UNIT=%n \
   --device /dev/dri:/dev/dri \
   -v /data/appdata/emby:/config:Z \
   -v /data/media:/media:z \
-  lscr.io/linuxserver/emby:latest
+  lscr.io/emby/embyserver:latest
 
 ExecStop=/usr/bin/podman stop -t 10 emby
 
