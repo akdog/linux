@@ -15,7 +15,7 @@ ExecStart=/usr/bin/podman run \
   --replace \
   --rm \
   --name=emby \
-  --net=host
+  --net=host  \
   --log-driver=journald \
   --label "io.containers.autoupdate=registry" \
   --label PODMAN_SYSTEMD_UNIT=%n \
